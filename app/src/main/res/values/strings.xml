@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Emby短视频客户端</string>
+    <string name="empty_title">还没有可播放的视频</string>
+    <string name="empty_hint">连接 Emby 服务器并选择一个媒体目录，即可开始沉浸播放</string>
+    <string name="connect_emby">连接 Emby</string>
+</resources>

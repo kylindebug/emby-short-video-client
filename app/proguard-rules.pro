@@ -1,0 +1,2 @@
+-keep class org.videolan.** { *; }
+-keep class androidx.media3.** { *; }
