@@ -25,4 +25,11 @@ public class GesturePolicyTest {
     @Test public void UpwardSwipeIsNotBlockedByTopSafeZone() {
         assertTrue(GesturePolicy.allowVerticalSwitch(1, -600, 2400, 3f));
     }
+
+    @Test public void verticalCommitUsesTheLargerDistanceThreshold() {
+        assertFalse(GesturePolicy.shouldCommitVertical(250, 2400, 72));
+        assertTrue(GesturePolicy.shouldCommitVertical(288, 2400, 72));
+        assertFalse(GesturePolicy.shouldCommitVertical(143, 600, 72));
+        assertTrue(GesturePolicy.shouldCommitVertical(144, 600, 72));
+    }
 }

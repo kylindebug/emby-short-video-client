@@ -14,8 +14,10 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -40,14 +42,22 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     private AppSettings settings;
     private EmbyApi api;
     private PreloadCache preloadCache;
+    private ThumbnailLoader thumbnailLoader;
     private RandomPlaylist playlist;
     private PlaybackEngine engine;
+    private PlaybackEngine previewEngine;
     private FrameLayout root;
+    private FrameLayout videoDeck;
     private FrameLayout videoContainer;
+    private FrameLayout previewContainer;
+    private FrameLayout thumbnailPreview;
     private LinearLayout pausedControls;
     private LinearLayout progressOverlay;
     private TextView titleView;
     private TextView feedbackView;
+    private TextView speedView;
+    private TextView thumbnailTimeView;
+    private ImageView thumbnailImageView;
     private TextView elapsedView;
     private TextView durationView;
     private SeekBar progressSeek;
@@ -57,14 +67,20 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     private boolean seekActive;
     private boolean manualSeekActive;
     private boolean longWasPlaying;
+    private boolean longSpeedActive;
     private float speedBeforeLong = 1f;
     private boolean autoFallbackUsed;
+    private boolean previewNext;
+    private boolean switchAnimating;
+    private Uri currentPlayableUri;
+    private Uri previewPlayableUri;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         settings = new AppSettings(this);
         api = new EmbyApi(this, settings);
         preloadCache = new PreloadCache(this, api);
+        thumbnailLoader = new ThumbnailLoader(this);
         rotation = new RotationController(this);
         buildUi();
         hideSystemUi();
@@ -75,14 +91,23 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     private void buildUi() {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
+        videoDeck = new FrameLayout(this);
+        videoDeck.setClipChildren(true);
         videoContainer = new FrameLayout(this);
-        root.addView(videoContainer, match());
+        videoDeck.addView(videoContainer, match());
+        root.addView(videoDeck, match());
 
         GestureView gestures = new GestureView(this, this);
         root.addView(gestures, match());
 
         buildPausedControls();
         root.addView(pausedControls, match());
+
+        buildThumbnailPreview();
+        FrameLayout.LayoutParams thumbnailParams = new FrameLayout.LayoutParams(
+                dp(184), dp(108), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        thumbnailParams.bottomMargin = dp(92);
+        root.addView(thumbnailPreview, thumbnailParams);
 
         buildProgressOverlay();
         FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
@@ -100,7 +125,40 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         feedbackView.setPadding(dp(18), dp(10), dp(18), dp(10));
         feedbackView.setVisibility(View.GONE);
         root.addView(feedbackView, wrap(Gravity.CENTER));
+
+        speedView = new TextView(this);
+        UiStyle.stylePrimaryText(speedView, 15, true);
+        speedView.setGravity(Gravity.CENTER);
+        speedView.setAlpha(0.68f);
+        speedView.setBackground(UiStyle.rounded(this, 0x661C2433, 14));
+        speedView.setPadding(dp(14), dp(7), dp(14), dp(7));
+        speedView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams speedParams = wrap(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        speedParams.topMargin = dp(30);
+        root.addView(speedView, speedParams);
         setContentView(root);
+    }
+
+    private void buildThumbnailPreview() {
+        thumbnailPreview = new FrameLayout(this);
+        thumbnailPreview.setPadding(dp(3), dp(3), dp(3), dp(3));
+        thumbnailPreview.setBackground(UiStyle.rounded(this, 0xCC101722, 12, 0x99FFFFFF, 1));
+        thumbnailPreview.setElevation(dp(10));
+        thumbnailPreview.setVisibility(View.GONE);
+
+        thumbnailImageView = new ImageView(this);
+        thumbnailImageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        thumbnailImageView.setBackgroundColor(Color.BLACK);
+        thumbnailPreview.addView(thumbnailImageView, match());
+
+        thumbnailTimeView = new TextView(this);
+        UiStyle.stylePrimaryText(thumbnailTimeView, 12, true);
+        thumbnailTimeView.setGravity(Gravity.CENTER);
+        thumbnailTimeView.setBackground(UiStyle.rounded(this, 0x99000000, 9));
+        thumbnailTimeView.setPadding(dp(9), dp(3), dp(9), dp(3));
+        FrameLayout.LayoutParams timeParams = wrap(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        timeParams.bottomMargin = dp(7);
+        thumbnailPreview.addView(thumbnailTimeView, timeParams);
     }
 
     private void buildPausedControls() {
@@ -166,6 +224,7 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
                 long duration = engine.durationMs();
                 long target = duration > 0 ? Math.round(duration * (progress / (double) PROGRESS_MAX)) : 0;
                 updateProgressInfo(target, duration);
+                showThumbnail(target);
             }
 
             @Override public void onStartTrackingTouch(SeekBar bar) {
@@ -180,6 +239,7 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
                     updateProgressInfo(target, engine.durationMs());
                 }
                 manualSeekActive = false;
+                hideThumbnailAfter(400);
                 hideProgressIfPlaying(650);
             }
         });
@@ -223,30 +283,42 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     }
 
     private void createEngine(AppSettings.Decoder decoder) {
+        clearSwipePreview();
         if (engine != null) engine.release();
         videoContainer.removeAllViews();
-        engine = decoder == AppSettings.Decoder.HARDWARE ? new Media3Engine(this) : new VlcEngine(this);
+        engine = newPlaybackEngine(decoder);
         engine.setListener(this);
         videoContainer.addView(engine.view(), match());
+    }
+
+    private PlaybackEngine newPlaybackEngine(AppSettings.Decoder decoder) {
+        return decoder == AppSettings.Decoder.HARDWARE ? new Media3Engine(this) : new VlcEngine(this);
     }
 
     private void playCurrent(boolean autoPlay) {
         VideoItem item = playlist.current();
         titleView.setText(item.title);
         updateProgressInfo(0, -1);
-        Uri uri = preloadCache.playableUri(item);
+        currentPlayableUri = preloadCache.playableUri(item);
+        thumbnailLoader.cancel();
         engine.setSpeed(1f);
-        engine.load(uri, autoPlay);
+        engine.load(currentPlayableUri, autoPlay);
         setPausedUiVisible(!autoPlay);
         preloadCache.preload(playlist.upcoming(2));
     }
 
     private void switchVideo(boolean next) {
         if (playlist == null || playlist.isEmpty() || engine == null) return;
+        clearSwipePreview();
+        videoContainer.animate().cancel();
+        videoContainer.setTranslationY(0f);
         if (next) playlist.next(); else playlist.previous();
         autoFallbackUsed = false;
         seekActive = false;
         manualSeekActive = false;
+        longSpeedActive = false;
+        speedView.setVisibility(View.GONE);
+        hideThumbnail();
         playCurrent(true);
     }
 
@@ -289,6 +361,16 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         runOnUiThread(() -> setPausedUiVisible(!playing));
     }
 
+    @Override public void onSingleTap() {
+        if (engine == null || !engine.isPlaying() || seekActive || manualSeekActive) return;
+        if (progressOverlay.getVisibility() == View.VISIBLE) {
+            hideProgressOverlayAnimated();
+        } else {
+            showProgressOverlay();
+            hideProgressIfPlaying(3_000);
+        }
+    }
+
     @Override public void onDoubleTap() {
         if (engine == null) return;
         if (engine.isPlaying()) engine.pause(); else engine.play();
@@ -306,38 +388,168 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         long target = seekBaseMs + actualDelta;
         updateProgressInfo(target, duration);
         showProgressOverlay();
+        showThumbnail(target);
         showFeedback(formatTime(target) + "  (" + signedSeconds(actualDelta) + ")", 0);
         if (finished) {
             engine.seekTo(target);
             seekActive = false;
             showFeedback("已定位到 " + formatTime(target), 650);
+            hideThumbnailAfter(400);
             hideProgressIfPlaying(650);
         }
     }
 
-    @Override public void onVerticalSwitch(boolean next) { switchVideo(next); }
+    @Override public void onVerticalDrag(float deltaPx, float heightPx) {
+        if (engine == null || playlist == null || playlist.isEmpty() || switchAnimating || heightPx <= 0) return;
+        boolean next = deltaPx < 0;
+        prepareSwipePreview(next, heightPx);
+        if (previewContainer == null) return;
+        float offset = Math.max(-heightPx, Math.min(heightPx, deltaPx));
+        videoContainer.setTranslationY(offset);
+        previewContainer.setTranslationY(offset + (next ? heightPx : -heightPx));
+        pausedControls.setVisibility(View.GONE);
+        hideProgressOverlayNow();
+        hideThumbnail();
+    }
+
+    @Override public void onVerticalRelease(float deltaPx, float heightPx, boolean commit) {
+        if (switchAnimating) return;
+        if (previewContainer == null || heightPx <= 0) {
+            videoContainer.setTranslationY(0f);
+            setPausedUiVisible(engine != null && !engine.isPlaying());
+            return;
+        }
+        if (!commit) {
+            animateSwipeBack(heightPx);
+            return;
+        }
+        animateSwipeCommit(heightPx);
+    }
 
     @Override public void onLongPressStart(boolean upperHalf) {
         if (engine == null) return;
         longWasPlaying = engine.isPlaying();
+        longSpeedActive = true;
         speedBeforeLong = engine.speed();
         float rate = upperHalf ? settings.upperSpeed() : settings.lowerSpeed();
         engine.setSpeed(rate);
         if (!longWasPlaying) engine.play();
-        showFeedback(String.format(Locale.US, "%.3g×", rate), 0);
+        speedView.setText(String.format(Locale.US, "%.3g×", rate));
+        speedView.setVisibility(View.VISIBLE);
     }
 
     @Override public void onLongPressEnd() {
-        if (engine == null) return;
+        if (engine == null || !longSpeedActive) return;
         engine.setSpeed(speedBeforeLong);
         if (!longWasPlaying) engine.pause();
-        hideFeedback();
+        longSpeedActive = false;
+        speedView.setVisibility(View.GONE);
+    }
+
+    private void prepareSwipePreview(boolean next, float heightPx) {
+        if (previewContainer != null && previewNext == next) return;
+        clearSwipePreview();
+        previewNext = next;
+        VideoItem item = playlist.adjacent(next);
+        previewPlayableUri = preloadCache.playableUri(item);
+        previewContainer = new FrameLayout(this);
+        previewContainer.setBackgroundColor(Color.BLACK);
+        previewContainer.setTranslationY(next ? heightPx : -heightPx);
+        videoDeck.addView(previewContainer, match());
+        previewEngine = newPlaybackEngine(settings.decoder());
+        previewContainer.addView(previewEngine.view(), match());
+        previewEngine.setSpeed(1f);
+        previewEngine.load(previewPlayableUri, false);
+    }
+
+    private void animateSwipeBack(float heightPx) {
+        switchAnimating = true;
+        long durationMs = 180;
+        DecelerateInterpolator easing = new DecelerateInterpolator();
+        videoContainer.animate().cancel();
+        previewContainer.animate().cancel();
+        videoContainer.animate().translationY(0f).setDuration(durationMs).setInterpolator(easing).start();
+        previewContainer.animate()
+                .translationY(previewNext ? heightPx : -heightPx)
+                .setDuration(durationMs)
+                .setInterpolator(easing)
+                .withEndAction(() -> {
+                    clearSwipePreview();
+                    setPausedUiVisible(engine != null && !engine.isPlaying());
+                })
+                .start();
+    }
+
+    private void animateSwipeCommit(float heightPx) {
+        switchAnimating = true;
+        long durationMs = 190;
+        DecelerateInterpolator easing = new DecelerateInterpolator();
+        videoContainer.animate().cancel();
+        previewContainer.animate().cancel();
+        videoContainer.animate()
+                .translationY(previewNext ? -heightPx : heightPx)
+                .setDuration(durationMs)
+                .setInterpolator(easing)
+                .start();
+        previewContainer.animate()
+                .translationY(0f)
+                .setDuration(durationMs)
+                .setInterpolator(easing)
+                .withEndAction(this::finishSwipeCommit)
+                .start();
+    }
+
+    private void finishSwipeCommit() {
+        FrameLayout oldContainer = videoContainer;
+        PlaybackEngine oldEngine = engine;
+        boolean next = previewNext;
+        videoContainer = previewContainer;
+        engine = previewEngine;
+        currentPlayableUri = previewPlayableUri;
+        previewContainer = null;
+        previewEngine = null;
+        previewPlayableUri = null;
+        switchAnimating = false;
+
+        if (oldEngine != null) {
+            oldEngine.setListener(null);
+            oldEngine.release();
+        }
+        videoDeck.removeView(oldContainer);
+        videoContainer.setTranslationY(0f);
+        if (next) playlist.next(); else playlist.previous();
+        autoFallbackUsed = false;
+        seekActive = false;
+        manualSeekActive = false;
+        longSpeedActive = false;
+        speedView.setVisibility(View.GONE);
+        thumbnailLoader.cancel();
+        titleView.setText(playlist.current().title);
+        updateProgressInfo(0, -1);
+        engine.setListener(this);
+        engine.setSpeed(1f);
+        engine.play();
+        setPausedUiVisible(false);
+        preloadCache.preload(playlist.upcoming(2));
+    }
+
+    private void clearSwipePreview() {
+        if (previewContainer != null) previewContainer.animate().cancel();
+        if (previewEngine != null) {
+            previewEngine.setListener(null);
+            previewEngine.release();
+        }
+        if (previewContainer != null) videoDeck.removeView(previewContainer);
+        previewContainer = null;
+        previewEngine = null;
+        previewPlayableUri = null;
+        switchAnimating = false;
     }
 
     private void setPausedUiVisible(boolean visible) {
         pausedControls.setVisibility(visible ? View.VISIBLE : View.GONE);
         if (visible || seekActive || manualSeekActive) showProgressOverlay();
-        else progressOverlay.setVisibility(View.GONE);
+        else hideProgressOverlayNow();
         if (visible) syncProgressFromPlayer();
     }
 
@@ -361,7 +573,26 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
 
     private void showProgressOverlay() {
         mainHandler.removeCallbacksAndMessages("progress-hide");
+        progressOverlay.animate().cancel();
+        progressOverlay.setAlpha(1f);
         progressOverlay.setVisibility(View.VISIBLE);
+    }
+
+    private void hideProgressOverlayNow() {
+        mainHandler.removeCallbacksAndMessages("progress-hide");
+        progressOverlay.animate().cancel();
+        progressOverlay.setAlpha(1f);
+        progressOverlay.setVisibility(View.GONE);
+    }
+
+    private void hideProgressOverlayAnimated() {
+        mainHandler.removeCallbacksAndMessages("progress-hide");
+        if (progressOverlay.getVisibility() != View.VISIBLE) return;
+        progressOverlay.animate().cancel();
+        progressOverlay.animate().alpha(0f).setDuration(350).withEndAction(() -> {
+            progressOverlay.setVisibility(View.GONE);
+            progressOverlay.setAlpha(1f);
+        }).start();
     }
 
     private void hideProgressIfPlaying(long delayMs) {
@@ -369,9 +600,33 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         if (engine == null || !engine.isPlaying()) return;
         mainHandler.postAtTime(() -> {
             if (engine != null && engine.isPlaying() && !seekActive && !manualSeekActive) {
-                progressOverlay.setVisibility(View.GONE);
+                hideProgressOverlayAnimated();
             }
         }, "progress-hide", android.os.SystemClock.uptimeMillis() + delayMs);
+    }
+
+    private void showThumbnail(long positionMs) {
+        if (currentPlayableUri == null) return;
+        mainHandler.removeCallbacksAndMessages("thumbnail-hide");
+        thumbnailTimeView.setText(formatTime(positionMs));
+        thumbnailPreview.setVisibility(View.VISIBLE);
+        thumbnailPreview.setAlpha(1f);
+        thumbnailLoader.request(currentPlayableUri, positionMs, dp(320), dp(180), bitmap -> {
+            if (thumbnailPreview.getVisibility() == View.VISIBLE) thumbnailImageView.setImageBitmap(bitmap);
+        });
+    }
+
+    private void hideThumbnailAfter(long delayMs) {
+        mainHandler.removeCallbacksAndMessages("thumbnail-hide");
+        mainHandler.postAtTime(this::hideThumbnail, "thumbnail-hide",
+                android.os.SystemClock.uptimeMillis() + delayMs);
+    }
+
+    private void hideThumbnail() {
+        mainHandler.removeCallbacksAndMessages("thumbnail-hide");
+        thumbnailLoader.cancel();
+        thumbnailPreview.setVisibility(View.GONE);
+        thumbnailImageView.setImageDrawable(null);
     }
 
     private void showFeedback(String text, long hideAfterMs) {
@@ -394,6 +649,12 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     @Override protected void onPause() {
         super.onPause();
         rotation.stop();
+        if (engine != null && longSpeedActive) {
+            engine.setSpeed(speedBeforeLong);
+            longSpeedActive = false;
+        }
+        speedView.setVisibility(View.GONE);
+        hideThumbnail();
         if (engine != null) engine.pause();
     }
 
@@ -404,13 +665,17 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
 
     @Override public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        clearSwipePreview();
+        videoContainer.setTranslationY(0f);
         hideSystemUi();
     }
 
     @Override protected void onDestroy() {
         mainHandler.removeCallbacksAndMessages(null);
         rotation.stop();
+        clearSwipePreview();
         if (engine != null) engine.release();
+        thumbnailLoader.release();
         preloadCache.release();
         io.shutdownNow();
         super.onDestroy();

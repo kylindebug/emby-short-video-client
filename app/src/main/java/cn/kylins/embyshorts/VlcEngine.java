@@ -17,6 +17,8 @@ public final class VlcEngine implements PlaybackEngine {
     private final VLCVideoLayout layout;
     private Listener listener;
     private float rate = 1f;
+    private boolean pauseAfterPrepare;
+    private final Runnable pausePreparedPreview;
 
     public VlcEngine(Context context) {
         libVlc = new LibVLC(context, Arrays.asList(
@@ -26,6 +28,9 @@ public final class VlcEngine implements PlaybackEngine {
                 "--drop-late-frames",
                 "--skip-frames"));
         player = new MediaPlayer(libVlc);
+        pausePreparedPreview = () -> {
+            if (pauseAfterPrepare) player.pause();
+        };
         layout = new VLCVideoLayout(context);
         player.attachViews(layout, null, false, false);
         player.setEventListener(event -> {
@@ -44,14 +49,24 @@ public final class VlcEngine implements PlaybackEngine {
         media.setHWDecoderEnabled(false, false);
         player.setMedia(media);
         media.release();
+        pauseAfterPrepare = !autoPlay;
+        layout.removeCallbacks(pausePreparedPreview);
         if (autoPlay) player.play();
         else {
             player.play();
-            layout.postDelayed(player::pause, 120);
+            layout.postDelayed(pausePreparedPreview, 120);
         }
     }
-    @Override public void play() { player.play(); }
-    @Override public void pause() { player.pause(); }
+    @Override public void play() {
+        pauseAfterPrepare = false;
+        layout.removeCallbacks(pausePreparedPreview);
+        player.play();
+    }
+    @Override public void pause() {
+        pauseAfterPrepare = false;
+        layout.removeCallbacks(pausePreparedPreview);
+        player.pause();
+    }
     @Override public boolean isPlaying() { return player.isPlaying(); }
     @Override public void seekTo(long positionMs) { player.setTime(positionMs); }
     @Override public long positionMs() { return player.getTime(); }
@@ -59,6 +74,8 @@ public final class VlcEngine implements PlaybackEngine {
     @Override public void setSpeed(float speed) { rate = speed; player.setRate(speed); }
     @Override public float speed() { return rate; }
     @Override public void release() {
+        pauseAfterPrepare = false;
+        layout.removeCallbacks(pausePreparedPreview);
         player.stop();
         player.detachViews();
         player.release();

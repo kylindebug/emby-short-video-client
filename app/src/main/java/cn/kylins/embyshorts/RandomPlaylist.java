@@ -22,6 +22,13 @@ public final class RandomPlaylist {
     public boolean isEmpty() { return items.isEmpty(); }
     public VideoItem current() { return items.get(index); }
 
+    public VideoItem adjacent(boolean next) {
+        if (items.isEmpty()) throw new IllegalStateException("Playlist is empty");
+        int offset = next ? 1 : -1;
+        int adjacentIndex = (index + offset + items.size()) % items.size();
+        return items.get(adjacentIndex);
+    }
+
     public VideoItem next() {
         if (items.size() == 1) return items.get(0);
         index++;

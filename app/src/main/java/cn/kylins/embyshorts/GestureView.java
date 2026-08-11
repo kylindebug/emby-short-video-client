@@ -14,9 +14,11 @@ import android.view.ViewConfiguration;
 @SuppressLint("ViewConstructor")
 public final class GestureView extends View {
     public interface Callback {
+        void onSingleTap();
         void onDoubleTap();
         void onSeekGesture(float deltaPx, float widthPx, boolean finished);
-        void onVerticalSwitch(boolean next);
+        void onVerticalDrag(float deltaPx, float heightPx);
+        void onVerticalRelease(float deltaPx, float heightPx, boolean commit);
         void onLongPressStart(boolean upperHalf);
         void onLongPressEnd();
     }
@@ -51,6 +53,10 @@ public final class GestureView extends View {
         setClickable(true);
         detector = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
             @Override public boolean onDown(MotionEvent event) { return true; }
+            @Override public boolean onSingleTapConfirmed(MotionEvent event) {
+                GestureView.this.callback.onSingleTap();
+                return true;
+            }
             @Override public boolean onDoubleTap(MotionEvent event) {
                 cancelPendingLongPress();
                 GestureView.this.callback.onDoubleTap();
@@ -79,6 +85,9 @@ public final class GestureView extends View {
                 mode = Math.abs(dx) >= Math.abs(dy) ? Mode.HORIZONTAL : Mode.VERTICAL;
             }
             if (mode == Mode.HORIZONTAL) callback.onSeekGesture(dx, getWidth(), false);
+            else if (mode == Mode.VERTICAL && GesturePolicy.allowVerticalSwitch(downY, dy, getHeight(), density)) {
+                callback.onVerticalDrag(dy, getHeight());
+            }
         }
         if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
             cancelPendingLongPress();
@@ -86,12 +95,12 @@ public final class GestureView extends View {
                 callback.onLongPressEnd();
             } else if (mode == Mode.HORIZONTAL) {
                 callback.onSeekGesture(event.getX() - downX, getWidth(), true);
-            } else if (mode == Mode.VERTICAL && event.getActionMasked() == MotionEvent.ACTION_UP) {
+            } else if (mode == Mode.VERTICAL) {
                 float dy = event.getY() - downY;
-                boolean farEnough = Math.abs(dy) >= Math.max(threshold * 2, getHeight() * 0.12f);
-                if (farEnough && GesturePolicy.allowVerticalSwitch(downY, dy, getHeight(), density)) {
-                    callback.onVerticalSwitch(dy < 0);
-                }
+                boolean allowed = GesturePolicy.allowVerticalSwitch(downY, dy, getHeight(), density);
+                boolean commit = event.getActionMasked() == MotionEvent.ACTION_UP && allowed
+                        && GesturePolicy.shouldCommitVertical(dy, getHeight(), threshold);
+                callback.onVerticalRelease(dy, getHeight(), commit);
             }
             mode = Mode.NONE;
             longPressActive = false;

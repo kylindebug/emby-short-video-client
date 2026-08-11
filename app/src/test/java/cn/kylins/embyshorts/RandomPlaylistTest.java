@@ -30,6 +30,19 @@ public class RandomPlaylistTest {
         assertEquals(original, list.current());
     }
 
+    @Test public void adjacentDoesNotMoveThePlaylistCursor() {
+        RandomPlaylist list = new RandomPlaylist(Arrays.asList(
+                new VideoItem("a", "A", "mp4"),
+                new VideoItem("b", "B", "mp4"),
+                new VideoItem("c", "C", "mp4")
+        ), new Random(9));
+        VideoItem current = list.current();
+        assertEquals(list.adjacent(true), list.next());
+        list.previous();
+        assertEquals(current, list.current());
+        assertEquals(list.adjacent(false), list.previous());
+    }
+
     @Test public void preloadedItemMatchesNextAcrossCycleBoundary() {
         RandomPlaylist list = new RandomPlaylist(Arrays.asList(
                 new VideoItem("a", "A", "mp4"),

@@ -122,7 +122,7 @@ public final class EmbyApi {
             prefs.edit().putString("device_id", deviceId).apply();
         }
         return "MediaBrowser Client=\"Emby Short Video Client\", Device=\"Android\", DeviceId=\"" +
-                deviceId + "\", Version=\"1.0.0\"";
+                deviceId + "\", Version=\"" + BuildConfig.VERSION_NAME + "\"";
     }
 
     private static String readAll(InputStream input) throws Exception {

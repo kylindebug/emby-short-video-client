@@ -18,4 +18,8 @@ public final class GesturePolicy {
     public static boolean shouldCancelLongPress(float deltaX, float deltaY, float touchSlopPx) {
         return Math.hypot(deltaX, deltaY) >= touchSlopPx;
     }
+
+    public static boolean shouldCommitVertical(float deltaY, float heightPx, float thresholdPx) {
+        return Math.abs(deltaY) >= Math.max(thresholdPx * 2f, heightPx * 0.12f);
+    }
 }
