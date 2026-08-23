@@ -21,9 +21,10 @@ public final class GestureView extends View {
         void onVerticalRelease(float deltaPx, float heightPx, boolean commit);
         void onLongPressStart(boolean upperHalf);
         void onLongPressEnd();
+        void onBackGesture();
     }
 
-    private enum Mode { NONE, HORIZONTAL, VERTICAL }
+    private enum Mode { NONE, HORIZONTAL, VERTICAL, BACK }
     private final GestureDetector detector;
     private final float threshold;
     private final float density;
@@ -33,6 +34,7 @@ public final class GestureView extends View {
     private Mode mode = Mode.NONE;
     private float downX;
     private float downY;
+    private int backEdge = GesturePolicy.BACK_EDGE_NONE;
     private boolean longPressActive;
     private boolean touchSequenceActive;
     private final Runnable activateLongPress;
@@ -41,7 +43,8 @@ public final class GestureView extends View {
         super(context);
         this.callback = callback;
         activateLongPress = () -> {
-            if (!touchSequenceActive || mode != Mode.NONE || longPressActive) return;
+            if (!touchSequenceActive || mode != Mode.NONE || longPressActive
+                    || backEdge != GesturePolicy.BACK_EDGE_NONE) return;
             longPressActive = true;
             performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
             this.callback.onLongPressStart(downY < getHeight() / 2f);
@@ -67,47 +70,81 @@ public final class GestureView extends View {
     }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
             downX = event.getX();
             downY = event.getY();
+            backEdge = GesturePolicy.backEdge(downX, getWidth());
             mode = Mode.NONE;
             longPressActive = false;
             touchSequenceActive = true;
             handler.removeCallbacks(activateLongPress);
-            handler.postDelayed(activateLongPress, GesturePolicy.LONG_PRESS_ACTIVATION_MS);
+            if (backEdge == GesturePolicy.BACK_EDGE_NONE) {
+                handler.postDelayed(activateLongPress, GesturePolicy.LONG_PRESS_ACTIVATION_MS);
+            }
         }
+
+        // End temporary speed before GestureDetector processes ACTION_UP. This keeps
+        // release latency independent of tap/double-tap recognition bookkeeping.
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            boolean endedLongPress = finishTouchSequence(event, action);
+            if (endedLongPress) {
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                detector.onTouchEvent(cancel);
+                cancel.recycle();
+            } else {
+                detector.onTouchEvent(event);
+            }
+            if (action == MotionEvent.ACTION_UP) performClick();
+            return true;
+        }
+
         detector.onTouchEvent(event);
-        if (event.getActionMasked() == MotionEvent.ACTION_MOVE && !longPressActive) {
+        if (action == MotionEvent.ACTION_MOVE && !longPressActive) {
             float dx = event.getX() - downX;
             float dy = event.getY() - downY;
             if (GesturePolicy.shouldCancelLongPress(dx, dy, longPressSlop)) cancelPendingLongPress();
             if (mode == Mode.NONE && Math.hypot(dx, dy) >= threshold) {
-                mode = Math.abs(dx) >= Math.abs(dy) ? Mode.HORIZONTAL : Mode.VERTICAL;
+                if (Math.abs(dx) >= Math.abs(dy)) {
+                    mode = backEdge == GesturePolicy.BACK_EDGE_NONE ? Mode.HORIZONTAL : Mode.BACK;
+                } else {
+                    mode = Mode.VERTICAL;
+                }
             }
             if (mode == Mode.HORIZONTAL) callback.onSeekGesture(dx, getWidth(), false);
             else if (mode == Mode.VERTICAL && GesturePolicy.allowVerticalSwitch(downY, dy, getHeight(), density)) {
                 callback.onVerticalDrag(dy, getHeight());
             }
         }
-        if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-            cancelPendingLongPress();
-            if (longPressActive) {
-                callback.onLongPressEnd();
-            } else if (mode == Mode.HORIZONTAL) {
-                callback.onSeekGesture(event.getX() - downX, getWidth(), true);
-            } else if (mode == Mode.VERTICAL) {
-                float dy = event.getY() - downY;
-                boolean allowed = GesturePolicy.allowVerticalSwitch(downY, dy, getHeight(), density);
-                boolean commit = event.getActionMasked() == MotionEvent.ACTION_UP && allowed
-                        && GesturePolicy.shouldCommitVertical(dy, getHeight(), threshold);
-                callback.onVerticalRelease(dy, getHeight(), commit);
-            }
-            mode = Mode.NONE;
-            longPressActive = false;
-            touchSequenceActive = false;
-            if (event.getActionMasked() == MotionEvent.ACTION_UP) performClick();
-        }
         return true;
+    }
+
+    private boolean finishTouchSequence(MotionEvent event, int action) {
+        cancelPendingLongPress();
+        boolean endedLongPress = longPressActive;
+        if (longPressActive) {
+            longPressActive = false;
+            callback.onLongPressEnd();
+        } else if (mode == Mode.HORIZONTAL) {
+            callback.onSeekGesture(event.getX() - downX, getWidth(), true);
+        } else if (mode == Mode.BACK) {
+            float dx = event.getX() - downX;
+            if (action == MotionEvent.ACTION_UP
+                    && GesturePolicy.shouldCommitBack(backEdge, dx, threshold)) {
+                callback.onBackGesture();
+            }
+        } else if (mode == Mode.VERTICAL) {
+            float dy = event.getY() - downY;
+            boolean allowed = GesturePolicy.allowVerticalSwitch(downY, dy, getHeight(), density);
+            boolean commit = action == MotionEvent.ACTION_UP && allowed
+                    && GesturePolicy.shouldCommitVertical(dy, getHeight(), threshold);
+            callback.onVerticalRelease(dy, getHeight(), commit);
+        }
+        mode = Mode.NONE;
+        backEdge = GesturePolicy.BACK_EDGE_NONE;
+        touchSequenceActive = false;
+        return endedLongPress;
     }
 
     private void cancelPendingLongPress() {
@@ -116,6 +153,8 @@ public final class GestureView extends View {
 
     @Override protected void onDetachedFromWindow() {
         cancelPendingLongPress();
+        longPressActive = false;
+        backEdge = GesturePolicy.BACK_EDGE_NONE;
         touchSequenceActive = false;
         super.onDetachedFromWindow();
     }

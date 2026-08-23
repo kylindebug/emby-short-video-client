@@ -9,7 +9,11 @@ public final class SeekMath {
         double normalized = Math.min(1.0, Math.abs(deltaPx) / widthPx);
         double maxMs = durationMs > 0 ? Math.min(300_000d, Math.max(10_000d, durationMs * 0.5d)) : 120_000d;
         double fineMs = 400d;
-        double magnitude = fineMs * (Math.exp(Math.log1p(maxMs / fineMs) * normalized) - 1d);
+        double exponential = fineMs * (Math.exp(Math.log1p(maxMs / fineMs) * normalized) - 1d);
+        double minimumReach = normalized <= (1d / 3d)
+                ? 45_000d * normalized * normalized
+                : 5_000d + 7_500d * (normalized - (1d / 3d));
+        double magnitude = Math.max(exponential, minimumReach);
         return Math.round(Math.copySign(magnitude, deltaPx));
     }
 

@@ -10,8 +10,11 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy;
 import androidx.media3.ui.PlayerView;
 
 @OptIn(markerClass = UnstableApi.class)
@@ -20,11 +23,25 @@ public final class Media3Engine implements PlaybackEngine {
     private final PlayerView playerView;
     private Listener listener;
 
-    public Media3Engine(Context context) {
+    public Media3Engine(Context context, PlaybackCache playbackCache) {
         DefaultRenderersFactory renderers = new DefaultRenderersFactory(context)
                 .setEnableDecoderFallback(true)
+                .setEnableAudioOutputPlaybackParameters(true)
                 .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF);
-        player = new ExoPlayer.Builder(context, renderers).build();
+        DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(CachePolicy.MIN_BUFFER_MS, CachePolicy.MAX_BUFFER_MS,
+                        500, 1_000)
+                .setTargetBufferBytes(CachePolicy.TARGET_MEMORY_BUFFER_BYTES)
+                .setPrioritizeTimeOverSizeThresholds(false)
+                .setBackBuffer(3_000, false)
+                .build();
+        DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(
+                playbackCache.dataSourceFactory())
+                .setLoadErrorHandlingPolicy(new DefaultLoadErrorHandlingPolicy(6));
+        player = new ExoPlayer.Builder(context, renderers)
+                .setLoadControl(loadControl)
+                .setMediaSourceFactory(mediaSourceFactory)
+                .build();
         player.setWakeMode(C.WAKE_MODE_NETWORK);
         player.setRepeatMode(Player.REPEAT_MODE_OFF);
         playerView = new PlayerView(context);

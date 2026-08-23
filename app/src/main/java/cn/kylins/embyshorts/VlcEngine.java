@@ -23,8 +23,8 @@ public final class VlcEngine implements PlaybackEngine {
     public VlcEngine(Context context) {
         libVlc = new LibVLC(context, Arrays.asList(
                 "--avcodec-hw=none",
-                "--network-caching=1500",
-                "--file-caching=500",
+                "--network-caching=6000",
+                "--file-caching=1000",
                 "--drop-late-frames",
                 "--skip-frames"));
         player = new MediaPlayer(libVlc);
@@ -47,6 +47,8 @@ public final class VlcEngine implements PlaybackEngine {
     @Override public void load(Uri uri, boolean autoPlay) {
         Media media = new Media(libVlc, uri);
         media.setHWDecoderEnabled(false, false);
+        media.addOption(":http-reconnect");
+        media.addOption(":network-caching=6000");
         player.setMedia(media);
         media.release();
         pauseAfterPrepare = !autoPlay;

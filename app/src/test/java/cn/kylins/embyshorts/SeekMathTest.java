@@ -20,6 +20,18 @@ public class SeekMathTest {
         assertEquals(10_000, SeekMath.clampPosition(20_000, 10_000));
     }
 
+    @Test public void oneThirdSwipeAlwaysMovesAtLeastFiveSeconds() {
+        assertTrue(SeekMath.deltaMs(1, 3, 10_000) >= 5_000);
+        assertTrue(SeekMath.deltaMs(1, 3, 600_000) >= 5_000);
+        assertTrue(SeekMath.deltaMs(-1, 3, 10_000) <= -5_000);
+    }
+
+    @Test public void shortSwipeKeepsFineControlForShortVideos() {
+        long shortSwipe = SeekMath.deltaMs(100, 1000, 10_000);
+        assertTrue(shortSwipe >= 400);
+        assertTrue(shortSwipe <= 500);
+    }
+
     @Test public void displayedDeltaStopsAtVideoBoundaries() {
         assertEquals(0, SeekMath.clampedDeltaMs(0, -30_000, 120_000));
         assertEquals(0, SeekMath.clampedDeltaMs(120_000, 30_000, 120_000));

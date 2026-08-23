@@ -32,4 +32,22 @@ public class GesturePolicyTest {
         assertFalse(GesturePolicy.shouldCommitVertical(143, 600, 72));
         assertTrue(GesturePolicy.shouldCommitVertical(144, 600, 72));
     }
+
+    @Test public void outerFivePercentIsReservedForAndroidBack() {
+        assertEquals(GesturePolicy.BACK_EDGE_LEFT, GesturePolicy.backEdge(0, 1000));
+        assertEquals(GesturePolicy.BACK_EDGE_LEFT, GesturePolicy.backEdge(50, 1000));
+        assertEquals(GesturePolicy.BACK_EDGE_NONE, GesturePolicy.backEdge(50.1f, 1000));
+        assertEquals(GesturePolicy.BACK_EDGE_NONE, GesturePolicy.backEdge(949.9f, 1000));
+        assertEquals(GesturePolicy.BACK_EDGE_RIGHT, GesturePolicy.backEdge(950, 1000));
+        assertEquals(GesturePolicy.BACK_EDGE_RIGHT, GesturePolicy.backEdge(1000, 1000));
+    }
+
+    @Test public void backGestureRequiresAnInwardSwipePastTheThreshold() {
+        assertFalse(GesturePolicy.shouldCommitBack(GesturePolicy.BACK_EDGE_LEFT, 23, 24));
+        assertTrue(GesturePolicy.shouldCommitBack(GesturePolicy.BACK_EDGE_LEFT, 24, 24));
+        assertFalse(GesturePolicy.shouldCommitBack(GesturePolicy.BACK_EDGE_LEFT, -100, 24));
+        assertFalse(GesturePolicy.shouldCommitBack(GesturePolicy.BACK_EDGE_RIGHT, -23, 24));
+        assertTrue(GesturePolicy.shouldCommitBack(GesturePolicy.BACK_EDGE_RIGHT, -24, 24));
+        assertFalse(GesturePolicy.shouldCommitBack(GesturePolicy.BACK_EDGE_RIGHT, 100, 24));
+    }
 }
