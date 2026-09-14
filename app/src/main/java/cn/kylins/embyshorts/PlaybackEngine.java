@@ -6,7 +6,7 @@ import android.view.View;
 public interface PlaybackEngine {
     interface Listener {
         void onEnded();
-        void onError(String message);
+        void onError(PlaybackFailure failure);
         void onPlayingChanged(boolean playing);
     }
 
@@ -16,6 +16,8 @@ public interface PlaybackEngine {
     void play();
     void pause();
     boolean isPlaying();
+    boolean playWhenReady();
+    PlaybackStatus status();
     void seekTo(long positionMs);
     long positionMs();
     long durationMs();
