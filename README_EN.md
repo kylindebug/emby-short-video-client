@@ -17,17 +17,19 @@ An immersive Android player for NAS-hosted Emby libraries (Android 8.0+, arm64-v
 - Downward swipes beginning in the top 72 dp / 8% safe area do not switch videos, preventing conflicts with Android's notification shade. Seek feedback is always clamped to the video's valid duration.
 - When paused, the player shows elapsed time, duration, and a draggable seek bar. During playback, a single tap shows the seek bar for three seconds with a fade-out; tapping again hides it immediately.
 - Dragging the seek bar or swiping horizontally refreshes a thumbnail in real time as the target second changes.
-- Long-press the upper or lower half of the screen for separate temporary playback speeds from 1/8× to 8×. Releasing restores the previous speed immediately.
+- Long-press the upper or lower half of the screen for temporary speeds from 1/8× to 8×. Press and release begin a short speed transition immediately; buffering is no longer mistaken for a user pause.
 - Long-press speed changes activate in about 140 ms with light haptic feedback. A low-opacity speed badge appears at the top so it does not cover the video, and beginning a swipe cancels the pending long press.
 - Distraction-free video while playing; pausing keeps the video at its original brightness while title, Settings, orientation, and lock controls appear.
 - The selected library or folder is shuffled on entry. The app no longer fully downloads two speculative queue items in parallel, avoiding extra NAS reads beyond active playback.
 - Media3 uses up to 48 MB/30 seconds of memory buffering and six stream retries. Compressed bytes actually read by playback enter a 256 MB read-through disk cache, with 72-hour expiry and LRU eviction.
 - Optional autoplay and configurable end behavior: next video, pause, or loop the current video.
+- Loading feedback shows elapsed waiting time and available real buffer data. Extended waits or failures expose retry, next video, software decoding, and Settings while swipe/back gestures remain available. Only explicit decoder/audio-output errors automatically switch to software decoding.
+- Software-mode swipe candidates show the next title and start decoding on release, reducing native-player contention during rapid swiping.
 
 ## Build
 
 ```powershell
-./gradlew.bat testDebugUnitTest assembleDebug
+./gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
 On first launch, open Settings and enter the Emby server address, port, and account. The password is hidden by default and can be revealed temporarily with the eye button. Select **Connect to server and choose...**, browse from a media library into the desired folder, select **Use current folder**, and save.

@@ -153,6 +153,7 @@ public final class GestureView extends View {
 
     @Override protected void onDetachedFromWindow() {
         cancelPendingLongPress();
+        if (longPressActive) callback.onLongPressEnd();
         longPressActive = false;
         backEdge = GesturePolicy.BACK_EDGE_NONE;
         touchSequenceActive = false;

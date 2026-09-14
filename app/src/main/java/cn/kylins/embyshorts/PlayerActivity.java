@@ -8,6 +8,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -21,6 +22,8 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.Button;
+import android.widget.ProgressBar;
 
 import java.util.List;
 import java.util.Locale;
@@ -35,6 +38,7 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     private final Runnable progressUpdater = new Runnable() {
         @Override public void run() {
             if (engine != null && !seekActive && !manualSeekActive) syncProgressFromPlayer();
+            if (!activityPaused) updatePlaybackStatus();
             mainHandler.postDelayed(this, 250);
         }
     };
@@ -73,6 +77,25 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     private boolean switchAnimating;
     private Uri currentPlayableUri;
     private Uri previewPlayableUri;
+    private LinearLayout loadingPanel;
+    private LinearLayout recoveryActions;
+    private TextView loadingText;
+    private ProgressBar loadingSpinner;
+    private Button softwareButton;
+    private boolean failureHandled;
+    private boolean activityPaused;
+    private boolean destroyed;
+    private final PlaybackHealth playbackHealth = new PlaybackHealth();
+    private final SpeedTransition speedTransition = new SpeedTransition();
+    private PlaybackEngine speedEngine;
+    private final Runnable speedStep = new Runnable() {
+        @Override public void run() {
+            if (speedEngine == null || speedEngine != engine || destroyed) return;
+            long now = SystemClock.uptimeMillis();
+            speedEngine.setSpeed(speedTransition.value(now));
+            if (!speedTransition.finished(now)) mainHandler.postDelayed(this, 25);
+        }
+    };
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -136,7 +159,131 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         FrameLayout.LayoutParams speedParams = wrap(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         speedParams.topMargin = dp(30);
         root.addView(speedView, speedParams);
+        buildLoadingPanel();
         setContentView(root);
+    }
+
+    private void buildLoadingPanel() {
+        loadingPanel = new LinearLayout(this);
+        loadingPanel.setOrientation(LinearLayout.VERTICAL);
+        loadingPanel.setGravity(Gravity.CENTER);
+        loadingPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        loadingPanel.setBackground(UiStyle.rounded(this, 0xE61C2433, 18));
+        loadingSpinner = new ProgressBar(this);
+        loadingPanel.addView(loadingSpinner, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        loadingText = new TextView(this);
+        UiStyle.stylePrimaryText(loadingText, 14, false);
+        loadingText.setGravity(Gravity.CENTER);
+        loadingText.setPadding(0, dp(10), 0, dp(10));
+        loadingPanel.addView(loadingText);
+        recoveryActions = new LinearLayout(this);
+        recoveryActions.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout firstRow = new LinearLayout(this);
+        firstRow.addView(recoveryButton("重试", () -> retryCurrent(false)), actionParams());
+        firstRow.addView(recoveryButton("下一条", () -> switchVideo(true)), actionParams());
+        recoveryActions.addView(firstRow);
+        LinearLayout secondRow = new LinearLayout(this);
+        softwareButton = recoveryButton("尝试软解", () -> retryCurrent(true));
+        secondRow.addView(softwareButton, actionParams());
+        secondRow.addView(recoveryButton("设置", () -> {
+            if (engine != null) engine.pause();
+            startActivityForResult(new Intent(this, SettingsActivity.class), SETTINGS_REQUEST);
+        }), actionParams());
+        recoveryActions.addView(secondRow);
+        loadingPanel.addView(recoveryActions);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+        params.leftMargin = params.rightMargin = dp(24);
+        root.addView(loadingPanel, params);
+        loadingPanel.setVisibility(View.GONE);
+    }
+
+    private LinearLayout.LayoutParams actionParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        params.setMargins(dp(3), dp(3), dp(3), dp(3));
+        return params;
+    }
+
+    private Button recoveryButton(String title, Runnable action) {
+        Button button = new Button(this);
+        button.setText(title);
+        UiStyle.styleSecondaryButton(button);
+        button.setMinHeight(dp(48));
+        button.setOnClickListener(v -> action.run());
+        return button;
+    }
+
+    private void resetPlaybackStatus() {
+        failureHandled = false;
+        playbackHealth.reset(SystemClock.uptimeMillis());
+        loadingPanel.setVisibility(View.GONE);
+        mainHandler.removeCallbacks(speedStep);
+        speedEngine = null;
+    }
+
+    private void updatePlaybackStatus() {
+        if (engine == null || destroyed) return;
+        PlaybackStatus state = engine.status();
+        if (state.failure != null && !failureHandled) {
+            onError(state.failure);
+            return;
+        }
+        long waiting = playbackHealth.waitingMs(state, engine.playWhenReady(),
+                engine.positionMs(), SystemClock.uptimeMillis());
+        boolean failed = state.failure != null;
+        boolean stalled = waiting >= PlaybackHealth.ACTION_DELAY_MS;
+        if ((!failed && waiting < PlaybackHealth.SHOW_DELAY_MS) || previewContainer != null) {
+            loadingPanel.setVisibility(View.GONE);
+            return;
+        }
+        String message;
+        if (failed) message = state.failure.message() + "\n" + state.failure.code;
+        else {
+            message = state.buffering ? "正在加载视频…" : !state.videoOutput
+                    ? "正在等待视频画面…" : "播放暂时没有前进…";
+            if (state.bufferingPercent >= 0) message += "\n缓冲 " + state.bufferingPercent + "%";
+            else if (state.bufferedMs > 0) message += String.format(Locale.CHINA,
+                    "\n已缓冲 %.1f 秒", state.bufferedMs / 1000f);
+            message += "\n已等待 " + waiting / 1000 + " 秒";
+            if (stalled) message += "\n等待较久，可能是网络或解码问题";
+        }
+        loadingText.setText(message + "\n仍可上下滑换片或返回");
+        loadingSpinner.setVisibility(failed || stalled ? View.GONE : View.VISIBLE);
+        recoveryActions.setVisibility(failed || stalled ? View.VISIBLE : View.GONE);
+        softwareButton.setVisibility(engine instanceof Media3Engine ? View.VISIBLE : View.GONE);
+        loadingPanel.setVisibility(View.VISIBLE);
+    }
+
+    private void retryCurrent(boolean software) {
+        if (engine == null || playlist == null || playlist.isEmpty()) return;
+        long position = Math.max(0, engine.positionMs());
+        AppSettings.Decoder decoder = software || engine instanceof VlcEngine
+                ? AppSettings.Decoder.SOFTWARE : settings.decoder();
+        onLongPressEnd();
+        boolean wantsPlay = engine.playWhenReady();
+        createEngine(decoder);
+        autoFallbackUsed = decoder == AppSettings.Decoder.SOFTWARE;
+        resetPlaybackStatus();
+        engine.load(currentPlayableUri, wantsPlay);
+        if (position > 0) engine.seekTo(position);
+        setPausedUiVisible(!wantsPlay);
+    }
+
+    private void bindEngineListener(PlaybackEngine source) {
+        source.setListener(new PlaybackEngine.Listener() {
+            private void dispatch(Runnable action) {
+                mainHandler.post(() -> {
+                    if (!destroyed && !activityPaused && engine == source) action.run();
+                });
+            }
+            @Override public void onEnded() { dispatch(PlayerActivity.this::onEnded); }
+            @Override public void onError(PlaybackFailure failure) {
+                dispatch(() -> PlayerActivity.this.onError(failure));
+            }
+            @Override public void onPlayingChanged(boolean playing) {
+                dispatch(() -> PlayerActivity.this.onPlayingChanged(playing));
+            }
+        });
     }
 
     private void buildThumbnailPreview() {
@@ -260,6 +407,7 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
             try {
                 List<VideoItem> videos = api.getVideos();
                 runOnUiThread(() -> {
+                    if (destroyed || isFinishing()) return;
                     hideFeedback();
                     playlist = new RandomPlaylist(videos);
                     if (playlist.isEmpty()) {
@@ -272,6 +420,7 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
+                    if (destroyed || isFinishing()) return;
                     hideFeedback();
                     titleView.setText(String.format(Locale.CHINA, "无法读取媒体库：%s", readable(error)));
                     setPausedUiVisible(true);
@@ -283,10 +432,17 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
 
     private void createEngine(AppSettings.Decoder decoder) {
         clearSwipePreview();
-        if (engine != null) engine.release();
+        mainHandler.removeCallbacks(speedStep);
+        speedEngine = null;
+        if (engine != null) {
+            engine.setListener(null);
+            engine.release();
+        }
+        videoContainer.animate().cancel();
+        videoContainer.setTranslationY(0f);
         videoContainer.removeAllViews();
         engine = newPlaybackEngine(decoder);
-        engine.setListener(this);
+        bindEngineListener(engine);
         videoContainer.addView(engine.view(), match());
     }
 
@@ -296,13 +452,14 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     }
 
     private void playCurrent(boolean autoPlay) {
+        resetPlaybackStatus();
         VideoItem item = playlist.current();
         titleView.setText(item.title);
         updateProgressInfo(0, -1);
         currentPlayableUri = Uri.parse(api.streamUrl(item));
         thumbnailLoader.cancel();
         engine.setSpeed(1f);
-        engine.load(currentPlayableUri, autoPlay);
+        engine.load(currentPlayableUri, autoPlay && !activityPaused);
         setPausedUiVisible(!autoPlay);
     }
 
@@ -318,6 +475,7 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         longSpeedActive = false;
         hideGestureStatus();
         hideThumbnail();
+        createEngine(settings.decoder());
         playCurrent(true);
     }
 
@@ -340,24 +498,31 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         });
     }
 
-    @Override public void onError(String message) {
+    @Override public void onError(PlaybackFailure failure) {
         runOnUiThread(() -> {
-            if (settings.decoder() == AppSettings.Decoder.HARDWARE && !autoFallbackUsed && engine != null) {
+            if (engine == null || destroyed || failureHandled) return;
+            failureHandled = true;
+            if (failure.kind == PlaybackFailure.Kind.DECODE && engine instanceof Media3Engine && !autoFallbackUsed) {
                 autoFallbackUsed = true;
-                long position = engine.positionMs();
+                long position = Math.max(0, engine.positionMs());
+                onLongPressEnd();
+                boolean wantsPlay = engine.playWhenReady();
                 createEngine(AppSettings.Decoder.SOFTWARE);
-                engine.load(currentPlayableUri, true);
-                mainHandler.postDelayed(() -> engine.seekTo(position), 400);
+                resetPlaybackStatus();
+                engine.load(currentPlayableUri, wantsPlay);
+                if (position > 0) engine.seekTo(position);
                 Toast.makeText(this, "硬解失败，已自动切换软解", Toast.LENGTH_LONG).show();
             } else {
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
                 setPausedUiVisible(true);
+                updatePlaybackStatus();
             }
         });
     }
 
     @Override public void onPlayingChanged(boolean playing) {
-        runOnUiThread(() -> setPausedUiVisible(!playing));
+        if (engine != null && previewContainer == null) {
+            setPausedUiVisible(!engine.playWhenReady() || engine.status().failure != null);
+        }
     }
 
     @Override public void onSingleTap() {
@@ -372,7 +537,9 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
 
     @Override public void onDoubleTap() {
         if (engine == null) return;
-        if (engine.isPlaying()) engine.pause(); else engine.play();
+        if (engine.status().failure != null) { retryCurrent(false); return; }
+        if (engine.playWhenReady()) engine.pause(); else engine.play();
+        setPausedUiVisible(!engine.playWhenReady());
     }
 
     @Override public void onSeekGesture(float deltaPx, float widthPx, boolean finished) {
@@ -399,7 +566,12 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     }
 
     @Override public void onVerticalDrag(float deltaPx, float heightPx) {
-        if (engine == null || playlist == null || playlist.isEmpty() || switchAnimating || heightPx <= 0) return;
+        if (engine == null || playlist == null || playlist.isEmpty() || heightPx <= 0) return;
+        if (switchAnimating) {
+            videoContainer.animate().cancel();
+            clearSwipePreview();
+            videoContainer.setTranslationY(0f);
+        }
         boolean next = deltaPx < 0;
         prepareSwipePreview(next, heightPx);
         if (previewContainer == null) return;
@@ -415,7 +587,7 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         if (switchAnimating) return;
         if (previewContainer == null || heightPx <= 0) {
             videoContainer.setTranslationY(0f);
-            setPausedUiVisible(engine != null && !engine.isPlaying());
+            setPausedUiVisible(engine != null && !engine.playWhenReady());
             return;
         }
         if (!commit) {
@@ -426,12 +598,15 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     }
 
     @Override public void onLongPressStart(boolean upperHalf) {
-        if (engine == null) return;
-        longWasPlaying = engine.isPlaying();
+        if (engine == null || longSpeedActive || switchAnimating || engine.status().failure != null) return;
+        longWasPlaying = engine.playWhenReady();
         longSpeedActive = true;
-        speedBeforeLong = engine.speed();
+        // A second hold can interrupt the previous restoration ramp.
+        if (speedEngine != engine || speedTransition.finished(SystemClock.uptimeMillis())) {
+            speedBeforeLong = engine.speed();
+        }
         float rate = upperHalf ? settings.upperSpeed() : settings.lowerSpeed();
-        engine.setSpeed(rate);
+        transitionSpeed(rate);
         if (!longWasPlaying) engine.play();
         showGestureStatus(String.format(Locale.US, "%.3g×", rate), 0);
     }
@@ -440,8 +615,20 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         if (engine == null || !longSpeedActive) return;
         longSpeedActive = false;
         hideGestureStatus();
-        if (!longWasPlaying) engine.pause();
-        engine.setSpeed(speedBeforeLong);
+        if (!longWasPlaying) {
+            mainHandler.removeCallbacks(speedStep);
+            engine.pause();
+            engine.setSpeed(speedBeforeLong);
+        } else transitionSpeed(speedBeforeLong);
+    }
+
+    private void transitionSpeed(float target) {
+        mainHandler.removeCallbacks(speedStep);
+        speedEngine = engine;
+        long now = SystemClock.uptimeMillis();
+        // Apply the first small step immediately; no pause/seek/prepare during a playing hold.
+        speedTransition.start(engine.speed(), target, now - 25);
+        speedStep.run();
     }
 
     @SuppressWarnings("deprecation")
@@ -459,10 +646,17 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         previewContainer.setBackgroundColor(Color.BLACK);
         previewContainer.setTranslationY(next ? heightPx : -heightPx);
         videoDeck.addView(previewContainer, match());
-        previewEngine = newPlaybackEngine(settings.decoder());
-        previewContainer.addView(previewEngine.view(), match());
-        previewEngine.setSpeed(1f);
-        previewEngine.load(previewPlayableUri, false);
+        TextView previewLabel = new TextView(this);
+        UiStyle.stylePrimaryText(previewLabel, 16, true);
+        previewLabel.setGravity(Gravity.CENTER);
+        previewLabel.setText(item.title + "\n松手播放");
+        previewContainer.addView(previewLabel, match());
+        // Do not open a second native software decoder for every swipe movement.
+        if (settings.decoder() == AppSettings.Decoder.HARDWARE) {
+            previewEngine = newPlaybackEngine(settings.decoder());
+            previewContainer.addView(previewEngine.view(), match());
+            previewEngine.load(previewPlayableUri, false);
+        }
     }
 
     private void animateSwipeBack(float heightPx) {
@@ -478,7 +672,7 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
                 .setInterpolator(easing)
                 .withEndAction(() -> {
                     clearSwipePreview();
-                    setPausedUiVisible(engine != null && !engine.isPlaying());
+                    setPausedUiVisible(engine != null && !engine.playWhenReady());
                 })
                 .start();
     }
@@ -503,6 +697,11 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
     }
 
     private void finishSwipeCommit() {
+        if (previewContainer == null || destroyed || activityPaused) {
+            clearSwipePreview();
+            videoContainer.setTranslationY(0f);
+            return;
+        }
         FrameLayout oldContainer = videoContainer;
         PlaybackEngine oldEngine = engine;
         boolean next = previewNext;
@@ -529,10 +728,18 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
         thumbnailLoader.cancel();
         titleView.setText(playlist.current().title);
         updateProgressInfo(0, -1);
-        engine.setListener(this);
+        resetPlaybackStatus();
+        if (engine == null) {
+            videoContainer.removeAllViews();
+            engine = newPlaybackEngine(settings.decoder());
+            videoContainer.addView(engine.view(), match());
+            engine.load(currentPlayableUri, false);
+        }
+        bindEngineListener(engine);
         engine.setSpeed(1f);
         engine.play();
         setPausedUiVisible(false);
+        updatePlaybackStatus();
     }
 
     private void clearSwipePreview() {
@@ -662,13 +869,23 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
 
     @Override protected void onResume() {
         super.onResume();
+        activityPaused = false;
+        playbackHealth.reset(SystemClock.uptimeMillis());
+        if (engine != null) setPausedUiVisible(!engine.playWhenReady());
         rotation.start();
         hideSystemUi();
     }
 
     @Override protected void onPause() {
         super.onPause();
+        activityPaused = true;
         rotation.stop();
+        mainHandler.removeCallbacks(speedStep);
+        if (engine != null && speedEngine == engine) engine.setSpeed(speedBeforeLong);
+        speedEngine = null;
+        videoContainer.animate().cancel();
+        clearSwipePreview();
+        videoContainer.setTranslationY(0f);
         if (engine != null && longSpeedActive) {
             engine.setSpeed(speedBeforeLong);
             longSpeedActive = false;
@@ -685,12 +902,15 @@ public final class PlayerActivity extends Activity implements PlaybackEngine.Lis
 
     @Override public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        onLongPressEnd();
+        videoContainer.animate().cancel();
         clearSwipePreview();
         videoContainer.setTranslationY(0f);
         hideSystemUi();
     }
 
     @Override protected void onDestroy() {
+        destroyed = true;
         mainHandler.removeCallbacksAndMessages(null);
         rotation.stop();
         clearSwipePreview();
